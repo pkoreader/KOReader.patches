@@ -1,7 +1,7 @@
 # KOReader.patches
 
 2-star-rating-hardcover.lua <br>
-I took idea from https://github.com/ImSoRight/KOReader.patches#2-star-rating-overlay. <br>
+I took idea from https://github.com/ImSoRight/KOReader.patches#2-star-rating-overlay. <br><br>
 It takes your hardcover linked book’s ratings and use it to show the star overlay on the respective books. <br> 
 When books are not linked, it checks metadata of the book and display those ratings onto the cover. <br>
 If both hardcover and metadata have the ratings, then it gives priority to hardcover ratings as their ratings have the facility of a half star. <br><br>
