@@ -1,10 +1,13 @@
---[[ User patch for KOReader: Hardcover Star Overlay (Perfect Sync & Match) ]]--
+--[[ User patch for KOReader: Hardcover Star Overlay (Native Metadata Fallback & Offline Cache) ]]--
+--[[made with AI]]
 
 local userpatch = require("userpatch")
 local Screen = require("device").screen
 local IconWidget = require("ui/widget/iconwidget")
 local Notification = require("ui/widget/notification")
 local logger = require("logger")
+local json = require("json")
+local lfs = require("lfs")
 
 if not _G.HardcoverRatingsCache then
     _G.HardcoverRatingsCache = {}
@@ -27,7 +30,8 @@ local function patchStarRating()
     local corner_mark_size = userpatch.getUpValue(orig_paint, "corner_mark_size") or Screen:scaleBySize(20)
 
     local init_done = false
-    local DataStorage, UIManager, NetworkManager
+    local DataStorage, UIManager, NetworkManager, DocSettings
+    local cache_file_path = ""
 
     function MosaicMenuItem:paintTo(bb, x, y)
         orig_paint(self, bb, x, y)
@@ -37,10 +41,25 @@ local function patchStarRating()
                 DataStorage = require("datastorage")
                 UIManager = require("ui/uimanager")
                 NetworkManager = require("ui/network/manager")
+                DocSettings = require("docsettings")
+                
+                cache_file_path = DataStorage:getDataDir() .. "/cache/2StarRatingHardcover.json"
+                
+                local f = io.open(cache_file_path, "r")
+                if f then
+                    local content = f:read("*all")
+                    f:close()
+                    local ok_json, parsed = pcall(json.decode, content)
+                    if ok_json and type(parsed) == "table" then
+                        for k, v in pairs(parsed) do
+                            _G.HardcoverRatingsCache[k] = v
+                        end
+                    end
+                end
+                
                 init_done = true
             end
 
-            -- TRIGGER BACKGROUND FETCH
             if not _G.HardcoverFetchStarted and NetworkManager and NetworkManager:isConnected() then
                 _G.HardcoverFetchStarted = true 
                 
@@ -51,7 +70,6 @@ local function patchStarRating()
                         local https_ok, https = pcall(require, "ssl.https")
                         local http_client = https_ok and https or require("socket.http")
                         local ltn12 = require("ltn12")
-                        local json = require("json")
 
                         local base_dir = DataStorage:getDataDir()
                         local config_paths = {
@@ -100,7 +118,6 @@ local function patchStarRating()
                                 local count = 0
                                 if me_data.user_books then
                                     for _, read_data in ipairs(me_data.user_books) do
-                                        -- STRICT FILTER: Only cache and count if rating is greater than 0
                                         if read_data.book and read_data.rating then
                                             local r = tonumber(read_data.rating)
                                             if r and r > 0 then
@@ -114,6 +131,17 @@ local function patchStarRating()
                                             end
                                         end
                                     end
+                                    
+                                    pcall(lfs.mkdir, DataStorage:getDataDir() .. "/cache") 
+                                    local out_f = io.open(cache_file_path, "w")
+                                    if out_f then
+                                        local ok_enc, encoded = pcall(json.encode, _G.HardcoverRatingsCache)
+                                        if ok_enc then
+                                            out_f:write(encoded)
+                                        end
+                                        out_f:close()
+                                    end
+
                                     UIManager:show(Notification:new{text="Hardcover: Successfully loaded " .. count .. " ratings!"})
                                     UIManager:setDirty(nil, "ui")
                                 end
@@ -126,13 +154,11 @@ local function patchStarRating()
                 end)
             end
 
-            -- Ensure it's drawing inside the cover boundaries
             local target = self[1] and self[1][1] and self[1][1][1]
             if not target or not target.dimen then return end
 
             local rating = nil
             
-            -- LOAD HARDCOVER SYNC SETTINGS (Just like main.lua does!)
             if not _G.HardcoverLinkedBooksCache then
                 local sync_path = DataStorage:getSettingsDir() .. "/hardcoversync_settings.lua"
                 local ok_sync, sync_data = pcall(dofile, sync_path)
@@ -143,7 +169,7 @@ local function patchStarRating()
                 end
             end
 
-            -- EXACT ID MATCH
+            -- Priority 1: Exact ID Match (Hardcover)
             if _G.HardcoverLinkedBooksCache[self.filepath] then
                 local book_data = _G.HardcoverLinkedBooksCache[self.filepath]
                 if type(book_data) == "table" and book_data.book_id then
@@ -151,19 +177,38 @@ local function patchStarRating()
                 end
             end
 
-            -- TITLE FALLBACK MATCH
-            if not rating then
-                local ok_info, book_info = pcall(function() return self.menu.getBookInfo(self.filepath) end)
-                if ok_info and book_info and book_info.title then
-                    local safe_title = normalizeTitle(book_info.title)
-                    rating = _G.HardcoverRatingsCache[safe_title]
+            -- Priority 2: Title Match (Hardcover)
+            local ok_info, book_info = pcall(function() return self.menu.getBookInfo(self.filepath) end)
+            if not rating and ok_info and book_info and book_info.title then
+                local safe_title = normalizeTitle(book_info.title)
+                rating = _G.HardcoverRatingsCache[safe_title]
+            end
+
+            -- Priority 3: EPUB/Calibre book_info Rating (If available via patches)
+            if not rating and ok_info and book_info and book_info.rating then
+                local meta_rating = tonumber(book_info.rating)
+                if meta_rating and meta_rating > 0 then
+                    if meta_rating > 5 then
+                        rating = meta_rating / 2
+                    else
+                        rating = meta_rating
+                    end
                 end
             end
 
-            -- Stop if book has no rating on Hardcover
+            -- Priority 4: KOReader's Native Local Rating (.sdr docsettings)
+            if not rating then
+                local ok_ds, doc_settings = pcall(function() return DocSettings:open(self.filepath) end)
+                if ok_ds and doc_settings then
+                    local summary = doc_settings:readSetting("summary")
+                    if summary and summary.rating and type(summary.rating) == "number" and summary.rating > 0 then
+                        rating = summary.rating
+                    end
+                end
+            end
+
             if not rating or rating <= 0 then return end
 
-            -- DRAW THE STARS
             local max_stars = 5
             local star_size = math.floor(corner_mark_size)
             local stars_width = max_stars * star_size 
