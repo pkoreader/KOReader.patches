@@ -1,5 +1,7 @@
---[[ User patch for KOReader: Hardcover Star Overlay (Native Metadata Fallback & Offline Cache) ]]--
---[[made with AI]]
+--[[ 
+  KOReader Patch: Hardcover Star Overlay (Community Universal Version)
+  Features: Live API Sync, Offline Cache, Native Metadata Fallback, Dual Matching 
+]]--
 
 local userpatch = require("userpatch")
 local Screen = require("device").screen
@@ -19,15 +21,24 @@ local function normalizeTitle(t)
 end
 
 local function patchStarRating()
-    local MosaicMenu = require("mosaicmenu")
+    -- UNIVERSAL SAFETY NET 1: Gracefully handle older/different KOReader versions
+    local ok_mosaic, MosaicMenu = pcall(require, "mosaicmenu")
+    if not ok_mosaic or not MosaicMenu or type(MosaicMenu._updateItemsBuildUI) ~= "function" then return end
+
     local MosaicMenuItem = userpatch.getUpValue(MosaicMenu._updateItemsBuildUI, "MosaicMenuItem")
-    
-    if not MosaicMenuItem then return end
+    if not MosaicMenuItem or type(MosaicMenuItem) ~= "table" or type(MosaicMenuItem.paintTo) ~= "function" then return end
+
     if MosaicMenuItem.patched_hardcover_stars then return end
     MosaicMenuItem.patched_hardcover_stars = true
 
     local orig_paint = MosaicMenuItem.paintTo
-    local corner_mark_size = userpatch.getUpValue(orig_paint, "corner_mark_size") or Screen:scaleBySize(20)
+    local corner_mark_size = Screen:scaleBySize(20)
+    
+    -- UNIVERSAL SAFETY NET 2: Catch missing upvalues safely
+    pcall(function() 
+        local val = userpatch.getUpValue(orig_paint, "corner_mark_size")
+        if val then corner_mark_size = val end
+    end)
 
     local init_done = false
     local DataStorage, UIManager, NetworkManager, DocSettings
@@ -37,11 +48,15 @@ local function patchStarRating()
         orig_paint(self, bb, x, y)
 
         local ok, err = pcall(function()
+            -- INITIALIZATION & OFFLINE CACHE LOADING
             if not init_done then
                 DataStorage = require("datastorage")
                 UIManager = require("ui/uimanager")
                 NetworkManager = require("ui/network/manager")
-                DocSettings = require("docsettings")
+                
+                -- Safely load DocSettings (varies by device)
+                local ok_ds, ds = pcall(require, "docsettings")
+                if ok_ds then DocSettings = ds end
                 
                 cache_file_path = DataStorage:getDataDir() .. "/cache/2StarRatingHardcover.json"
                 
@@ -60,6 +75,7 @@ local function patchStarRating()
                 init_done = true
             end
 
+            -- TRIGGER BACKGROUND FETCH (Updates local file)
             if not _G.HardcoverFetchStarted and NetworkManager and NetworkManager:isConnected() then
                 _G.HardcoverFetchStarted = true 
                 
@@ -132,6 +148,7 @@ local function patchStarRating()
                                         end
                                     end
                                     
+                                    -- SAVE TO LOCAL CACHE FILE SAFELY
                                     pcall(lfs.mkdir, DataStorage:getDataDir() .. "/cache") 
                                     local out_f = io.open(cache_file_path, "w")
                                     if out_f then
@@ -159,6 +176,7 @@ local function patchStarRating()
 
             local rating = nil
             
+            -- LOAD HARDCOVER SYNC SETTINGS
             if not _G.HardcoverLinkedBooksCache then
                 local sync_path = DataStorage:getSettingsDir() .. "/hardcoversync_settings.lua"
                 local ok_sync, sync_data = pcall(dofile, sync_path)
@@ -178,13 +196,20 @@ local function patchStarRating()
             end
 
             -- Priority 2: Title Match (Hardcover)
-            local ok_info, book_info = pcall(function() return self.menu.getBookInfo(self.filepath) end)
+            local ok_info, book_info = pcall(function() 
+                -- Safely look up book info if menu exists
+                if self.menu and self.menu.getBookInfo then 
+                    return self.menu.getBookInfo(self.filepath) 
+                end 
+                return nil 
+            end)
+
             if not rating and ok_info and book_info and book_info.title then
                 local safe_title = normalizeTitle(book_info.title)
                 rating = _G.HardcoverRatingsCache[safe_title]
             end
 
-            -- Priority 3: EPUB/Calibre book_info Rating (If available via patches)
+            -- Priority 3: EPUB/Calibre book_info Rating 
             if not rating and ok_info and book_info and book_info.rating then
                 local meta_rating = tonumber(book_info.rating)
                 if meta_rating and meta_rating > 0 then
@@ -197,9 +222,9 @@ local function patchStarRating()
             end
 
             -- Priority 4: KOReader's Native Local Rating (.sdr docsettings)
-            if not rating then
-                local ok_ds, doc_settings = pcall(function() return DocSettings:open(self.filepath) end)
-                if ok_ds and doc_settings then
+            if not rating and DocSettings then
+                local ok_ds_open, doc_settings = pcall(function() return DocSettings:open(self.filepath) end)
+                if ok_ds_open and doc_settings then
                     local summary = doc_settings:readSetting("summary")
                     if summary and summary.rating and type(summary.rating) == "number" and summary.rating > 0 then
                         rating = summary.rating
@@ -209,6 +234,7 @@ local function patchStarRating()
 
             if not rating or rating <= 0 then return end
 
+            -- DRAW THE STARS
             local max_stars = 5
             local star_size = math.floor(corner_mark_size)
             local stars_width = max_stars * star_size 
