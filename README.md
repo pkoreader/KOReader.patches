@@ -6,7 +6,7 @@ It takes your hardcover linked book’s ratings and use it to show the star over
 When books are not linked, it checks metadata of the book and display those ratings onto the cover. <br>
 If both hardcover and metadata have the ratings, then it gives priority to hardcover ratings as their ratings have the facility of a half star. <br><br>
 Note: <br>
-The ratings are stored under koreader/cache/2StarRatingHardcover.json which is created automatically.<br>
+The ratings are stored under koreader/settings//hardcover offline ratings.json which is created automatically.<br>
 In order to display hardcover ratings, you need to have hardcover plugin installed and need to have your books linked.<br><br>
 
 PS. This patch was created using AI and i have tested it on android and kindle PW 12. 
