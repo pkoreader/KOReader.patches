@@ -1,15 +1,10 @@
---[[ 
-  KOReader Patch: Hardcover Star Overlay (Community Universal Version)
-  Features: Live API Sync, Offline Cache, Native Metadata Fallback, Dual Matching 
-]]--
+--[[ User patch for KOReader: Hardcover Star Overlay (Perfect Sync, Metadata & Offline Cache) ]]--
 
 local userpatch = require("userpatch")
 local Screen = require("device").screen
 local IconWidget = require("ui/widget/iconwidget")
 local Notification = require("ui/widget/notification")
 local logger = require("logger")
-local json = require("json")
-local lfs = require("lfs")
 
 if not _G.HardcoverRatingsCache then
     _G.HardcoverRatingsCache = {}
@@ -21,53 +16,47 @@ local function normalizeTitle(t)
 end
 
 local function patchStarRating()
-    -- UNIVERSAL SAFETY NET 1: Gracefully handle older/different KOReader versions
-    local ok_mosaic, MosaicMenu = pcall(require, "mosaicmenu")
-    if not ok_mosaic or not MosaicMenu or type(MosaicMenu._updateItemsBuildUI) ~= "function" then return end
-
+    local MosaicMenu = require("mosaicmenu")
     local MosaicMenuItem = userpatch.getUpValue(MosaicMenu._updateItemsBuildUI, "MosaicMenuItem")
-    if not MosaicMenuItem or type(MosaicMenuItem) ~= "table" or type(MosaicMenuItem.paintTo) ~= "function" then return end
-
+    
+    if not MosaicMenuItem then return end
     if MosaicMenuItem.patched_hardcover_stars then return end
     MosaicMenuItem.patched_hardcover_stars = true
 
     local orig_paint = MosaicMenuItem.paintTo
-    local corner_mark_size = Screen:scaleBySize(20)
-    
-    -- UNIVERSAL SAFETY NET 2: Catch missing upvalues safely
-    pcall(function() 
-        local val = userpatch.getUpValue(orig_paint, "corner_mark_size")
-        if val then corner_mark_size = val end
-    end)
+    local corner_mark_size = userpatch.getUpValue(orig_paint, "corner_mark_size") or Screen:scaleBySize(20)
 
     local init_done = false
     local DataStorage, UIManager, NetworkManager, DocSettings
-    local cache_file_path = ""
 
     function MosaicMenuItem:paintTo(bb, x, y)
         orig_paint(self, bb, x, y)
 
         local ok, err = pcall(function()
-            -- INITIALIZATION & OFFLINE CACHE LOADING
+            -- 1. THE LAZY LOAD: Safe zone for loading modules
             if not init_done then
                 DataStorage = require("datastorage")
                 UIManager = require("ui/uimanager")
                 NetworkManager = require("ui/network/manager")
                 
-                -- Safely load DocSettings (varies by device)
+                -- Safely load DocSettings for native KOReader metadata
                 local ok_ds, ds = pcall(require, "docsettings")
                 if ok_ds then DocSettings = ds end
-                
-                cache_file_path = DataStorage:getDataDir() .. "/cache/2StarRatingHardcover.json"
-                
-                local f = io.open(cache_file_path, "r")
-                if f then
-                    local content = f:read("*all")
-                    f:close()
-                    local ok_json, parsed = pcall(json.decode, content)
-                    if ok_json and type(parsed) == "table" then
-                        for k, v in pairs(parsed) do
-                            _G.HardcoverRatingsCache[k] = v
+
+                -- OFFLINE CACHE LOAD
+                local json_ok, json = pcall(require, "json")
+                if json_ok then
+                    -- Save directly to settings dir to avoid lfs.mkdir crashes
+                    _G.HardcoverCachePath = DataStorage:getSettingsDir() .. "/hardcover_offline_ratings.json"
+                    local f = io.open(_G.HardcoverCachePath, "r")
+                    if f then
+                        local content = f:read("*all")
+                        f:close()
+                        local ok_decode, parsed = pcall(json.decode, content)
+                        if ok_decode and type(parsed) == "table" then
+                            for k, v in pairs(parsed) do
+                                _G.HardcoverRatingsCache[k] = v
+                            end
                         end
                     end
                 end
@@ -75,7 +64,7 @@ local function patchStarRating()
                 init_done = true
             end
 
-            -- TRIGGER BACKGROUND FETCH (Updates local file)
+            -- 2. TRIGGER BACKGROUND FETCH
             if not _G.HardcoverFetchStarted and NetworkManager and NetworkManager:isConnected() then
                 _G.HardcoverFetchStarted = true 
                 
@@ -86,6 +75,7 @@ local function patchStarRating()
                         local https_ok, https = pcall(require, "ssl.https")
                         local http_client = https_ok and https or require("socket.http")
                         local ltn12 = require("ltn12")
+                        local json = require("json")
 
                         local base_dir = DataStorage:getDataDir()
                         local config_paths = {
@@ -148,15 +138,14 @@ local function patchStarRating()
                                         end
                                     end
                                     
-                                    -- SAVE TO LOCAL CACHE FILE SAFELY
-                                    pcall(lfs.mkdir, DataStorage:getDataDir() .. "/cache") 
-                                    local out_f = io.open(cache_file_path, "w")
-                                    if out_f then
-                                        local ok_enc, encoded = pcall(json.encode, _G.HardcoverRatingsCache)
-                                        if ok_enc then
-                                            out_f:write(encoded)
+                                    -- SAVE TO OFFLINE CACHE
+                                    if _G.HardcoverCachePath then
+                                        local out_f = io.open(_G.HardcoverCachePath, "w")
+                                        if out_f then
+                                            local ok_enc, encoded = pcall(json.encode, _G.HardcoverRatingsCache)
+                                            if ok_enc then out_f:write(encoded) end
+                                            out_f:close()
                                         end
-                                        out_f:close()
                                     end
 
                                     UIManager:show(Notification:new{text="Hardcover: Successfully loaded " .. count .. " ratings!"})
@@ -176,7 +165,6 @@ local function patchStarRating()
 
             local rating = nil
             
-            -- LOAD HARDCOVER SYNC SETTINGS
             if not _G.HardcoverLinkedBooksCache then
                 local sync_path = DataStorage:getSettingsDir() .. "/hardcoversync_settings.lua"
                 local ok_sync, sync_data = pcall(dofile, sync_path)
@@ -195,21 +183,14 @@ local function patchStarRating()
                 end
             end
 
-            -- Priority 2: Title Match (Hardcover)
-            local ok_info, book_info = pcall(function() 
-                -- Safely look up book info if menu exists
-                if self.menu and self.menu.getBookInfo then 
-                    return self.menu.getBookInfo(self.filepath) 
-                end 
-                return nil 
-            end)
-
+            -- Priority 2: Title Fallback Match (Hardcover)
+            local ok_info, book_info = pcall(function() return self.menu.getBookInfo(self.filepath) end)
             if not rating and ok_info and book_info and book_info.title then
                 local safe_title = normalizeTitle(book_info.title)
                 rating = _G.HardcoverRatingsCache[safe_title]
             end
 
-            -- Priority 3: EPUB/Calibre book_info Rating 
+            -- Priority 3: EPUB/Calibre book_info Rating (Metadata Fallback)
             if not rating and ok_info and book_info and book_info.rating then
                 local meta_rating = tonumber(book_info.rating)
                 if meta_rating and meta_rating > 0 then
@@ -221,7 +202,7 @@ local function patchStarRating()
                 end
             end
 
-            -- Priority 4: KOReader's Native Local Rating (.sdr docsettings)
+            -- Priority 4: KOReader's Native Local Rating (Book Status Menu)
             if not rating and DocSettings then
                 local ok_ds_open, doc_settings = pcall(function() return DocSettings:open(self.filepath) end)
                 if ok_ds_open and doc_settings then
